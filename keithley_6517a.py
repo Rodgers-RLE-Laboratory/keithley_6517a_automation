@@ -192,10 +192,14 @@ class Keithley6517A:
             except:
                 pass
 
-            # Try to flush any pending output
+            # Try to flush any pending output with short timeout
             try:
+                original_timeout = self.instrument.timeout
+                self.instrument.timeout = 500  # Short 500ms timeout for flush
                 self.instrument.read()
+                self.instrument.timeout = original_timeout
             except:
+                self.instrument.timeout = original_timeout  # Restore timeout
                 pass  # Expected to fail if no data
 
             # Get instrument ID (with retry)
@@ -248,6 +252,24 @@ class Keithley6517A:
         instr.write(f':SYST:ZCH {state}')
         print(f"Zero check: {state} (meter {'disconnected' if enabled else 'connected'})")
         self.check_errors()
+
+    def set_line_sync(self, enabled: bool):
+        """
+        Enable synchronization to line voltage and set to integrate over 10 cycles.
+
+        Args:
+            enabled: True to enable line sync,
+                    False to disable line sync
+        """
+        instr = self._ensure_connected()
+        state = 'ON' if enabled else 'OFF'
+        nplc = 10
+        instr.write(f':SYST:LSYN:STAT {state}')
+        instr.write(f':SENS:RES:NPLC {nplc}')
+        print(f"Line sync: {state}")
+        self.check_errors()
+
+        return nplc
 
     def configure_voltage_source(self, voltage: float):
         """
@@ -318,16 +340,19 @@ class Keithley6517A:
             instr.write(f':SENS:{function}:RANG:AUTO OFF')
         time.sleep(0.5)
 
+        nplc = self.set_line_sync(True)
+
         # Configure averaging (digital filter)
         # The 6517A uses AVER:TCON (time control) for filtering
         if averaging_on:
-            instr.write(f':SENS:{function}:AVER:TCON REP')  # Repeating average
+            instr.write(f':SENS:{function}:AVER:TCON REP') # Repeating average
             time.sleep(0.5)
-            instr.write(f':SENS:{function}:AVER:COUN 1')    # 1 reading (1/60 s)
+            n_readings = 10
+            instr.write(f':SENS:{function}:AVER:COUN {n_readings}') # Averages this many readings
             time.sleep(0.5)
             instr.write(f':SENS:{function}:AVER ON')
             time.sleep(0.5)
-            print(f"Averaging enabled: 1/60 s (16.67 ms) filter")
+            print(f"Averaging enabled: {n_readings} samples, each integrated across {nplc} power cycles (1/60 s (16.67 ms))")
         else:
             instr.write(f':SENS:{function}:AVER OFF')
             time.sleep(0.5)
@@ -545,8 +570,7 @@ class Keithley6517A:
 
     def collect_data(self, duration: float = 5.0,
                     function: str = 'CURR',
-                    range_value: str = 'AUTO',
-                    explicit_trigger: bool = True) -> pd.DataFrame:
+                    explicit_trigger=True) -> pd.DataFrame:
         """
         Collect measurement data for a specified duration.
 
@@ -560,8 +584,6 @@ class Keithley6517A:
             pandas DataFrame with columns: 'time' (seconds), 'value',
             'timestamp' (absolute time)
         """
-        # Configure instrument (including trigger system)
-        self.configure_measurement(function, range_value, averaging_on=True)
 
         print(f"\nCollecting data for {duration} seconds...")
         print("Press Ctrl+C to stop early\n")
@@ -761,7 +783,7 @@ class Keithley6517A:
             pandas DataFrame with collected data
         """
         # Collect data
-        df = self.collect_data(duration, function, range_value)
+        df = self.collect_data(duration, function, True)
 
         # Save CSV if requested
         if save_csv:
@@ -939,11 +961,11 @@ def main():
     #   Linux: 'ASRL/dev/ttyUSB0::INSTR'
     #   macOS: 'ASRL/dev/tty.usbserial::INSTR'
 
-    RESOURCE_NAME = 'ASRL/dev/tty.usbserial-110::INSTR'  # Change this to match your system
+    RESOURCE_NAME = 'ASRL/dev/tty.usbserial-2110::INSTR'  # Change this to match your system
 
     # Voltage sweep configuration
     # Just 10 repeats at 50V
-    voltage_sequence = [50] * 5
+    voltage_sequence = [1] * 5
     # Results in: [50, 50, 50, 50, 50, 50, 50, 50, 50, 50]
 
     measurement_duration = 60.0  # seconds per voltage level
@@ -952,9 +974,15 @@ def main():
     all_data = []
 
     # Use context manager for automatic connect/disconnect
-    with Keithley6517A(RESOURCE_NAME) as keithley:
+    with Keithley6517A(RESOURCE_NAME, timeout=30000) as keithley:  # 30s timeout for 100-sample averaging
         # Disable zero check (connect meter)
         keithley.set_zero_check(False)
+
+        # Configure instrument (including trigger system)
+        FUNCTION = 'RES'
+        RANGE = '200e9'
+        EXP_TRIGGER = True
+        keithley.configure_measurement(FUNCTION, RANGE, averaging_on=True)
 
         # Enable high voltage output
         keithley.enable_output(True)
@@ -1017,9 +1045,8 @@ def main():
             try:
                 df = keithley.collect_data(
                     duration=measurement_duration,
-                    function='RES',
-                    range_value='AUTO',
-                    explicit_trigger=True
+                    function=FUNCTION,
+                    explicit_trigger=EXP_TRIGGER
                 )
 
                 # Add voltage and direction labels to the data

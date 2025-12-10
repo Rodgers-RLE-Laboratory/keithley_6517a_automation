@@ -9,7 +9,7 @@ If this doesn't work, power cycle the instrument (turn off and back on).
 import pyvisa
 import time
 
-RESOURCE_NAME = 'ASRL/dev/tty.usbserial-110::INSTR'
+RESOURCE_NAME = 'ASRL/dev/tty.usbserial-2110::INSTR'
 
 def recover_instrument():
     """Try to recover a stuck Keithley 6517A instrument."""
